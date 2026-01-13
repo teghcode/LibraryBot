@@ -3,6 +3,8 @@ import time
 import datetime
 import getpass
 import base64
+import argparse
+import sys
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
@@ -12,18 +14,34 @@ from webdriver_manager.chrome import ChromeDriverManager
 from selenium.webdriver.support.ui import Select
 from selenium.common.exceptions import NoSuchElementException, TimeoutException
 
-def book_room():
-    # --- Configuration ---
-    TARGET_ROOM = "464"
-    START_HOUR = 15 # 3 PM
-    START_MINUTE = 30
-    DURATION_HOURS = 3
+def parse_arguments():
+    parser = argparse.ArgumentParser(description="Carleton Library Room Booker")
     
+    # Defaults can be overridden by Environment Variables
+    default_room = os.environ.get("TARGET_ROOM", "464")
+    default_hour = os.environ.get("START_HOUR", "3") # 12-hour format
+    default_minute = os.environ.get("START_MINUTE", "30")
+    default_ampm = os.environ.get("START_AMPM", "PM") # AM or PM
+    default_duration = os.environ.get("DURATION_MINUTES", "180")
+    
+    parser.add_argument("--room", default=default_room, help="Target room number (e.g. 464)")
+    parser.add_argument("--hour", default=default_hour, type=int, help="Start hour (1-12)")
+    parser.add_argument("--minute", default=default_minute, type=int, help="Start minute (0-59)")
+    parser.add_argument("--ampm", default=default_ampm, choices=["AM", "PM"], help="AM or PM")
+    parser.add_argument("--duration", default=default_duration, type=int, help="Duration in minutes (e.g. 30, 60, 180)")
+    parser.add_argument("--dry-run", action="store_true", help="Perform a dry run without submitting the booking")
+    parser.add_argument("--headless", action="store_true", help="Run in headless mode")
+
+    return parser.parse_args()
+
+def book_room(args):
     print("--- Carleton Library Room Booker ---")
+    print(f"Configuration: Room={args.room}, Time={args.hour}:{args.minute:02d} {args.ampm}, Duration={args.duration} mins")
+    
+    if args.dry_run:
+        print("BS: *** DRY RUN MODE ENABLED - NO BOOKING WILL BE MAKING ***")
     
     # 1. Credentials
-    # You can store base64 encoded strings here to avoid plain text
-    # To generate: python -c "import base64; print(base64.b64encode(b'YOUR_PASSWORD').decode())"
     encoded_user = "" 
     encoded_pass = ""
     
@@ -49,7 +67,15 @@ def book_room():
     
     # 2. Setup Browser
     options = webdriver.ChromeOptions()
-    # options.add_argument("--headless") 
+    # Check for CI environment variable to run headless
+    is_ci = os.environ.get('CI') == 'true'
+    if is_ci or args.headless:
+        print("Running in headless mode")
+        options.add_argument("--headless")
+        options.add_argument("--no-sandbox")
+        options.add_argument("--disable-dev-shm-usage")
+        options.add_argument("--window-size=1920,1080")
+    
     driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
     wait = WebDriverWait(driver, 10)
     
@@ -78,6 +104,7 @@ def book_room():
             
         # 4. Select Date (One week from now)
         today = datetime.date.today()
+        # logic: book for 7 days ahead
         target_date = today + datetime.timedelta(days=7)
         target_day_str = str(target_date.day)
         print(f"Target Date: {target_date.strftime('%A, %B %d, %Y')}")
@@ -107,52 +134,99 @@ def book_room():
         time.sleep(2) 
         
         # 5. Select Start Time
-        print(f"Selecting start time {START_HOUR}:{START_MINUTE} for Room {TARGET_ROOM}...")
+        print(f"Selecting start time {args.hour}:{args.minute:02d} {args.ampm}...")
         
-        start_time = datetime.datetime.combine(target_date, datetime.time(START_HOUR, START_MINUTE))
-        time_str = start_time.strftime("%I:%M%p").lstrip("0").lower() 
+        # Convert 12h to 24h for datetime logic
+        hour_24 = args.hour
+        if args.ampm == "PM" and args.hour != 12:
+            hour_24 += 12
+        elif args.ampm == "AM" and args.hour == 12:
+            hour_24 = 0
+            
+        start_time = datetime.datetime.combine(target_date, datetime.time(hour_24, args.minute))
+        time_str = start_time.strftime("%I:%M%p").lstrip("0").lower() # e.g. "3:30pm"
         
-        xpath = f"//a[contains(@title, '{time_str}') and contains(@title, '{TARGET_ROOM}') and contains(@title, 'Available')]"
+        # Construct XPath based on strategy
+        # Strategy: "Any Room" (Try preferred, then fallback)
         
+        slot = None
+        
+        print(f"Looking for preferred Room {args.room} at {time_str}")
+        xpath_specific = f"//a[contains(@title, '{time_str}') and contains(@title, '{args.room}') and contains(@title, 'Available')]"
         try:
-            slot = wait.until(EC.element_to_be_clickable((By.XPATH, xpath)))
+            slot = driver.find_element(By.XPATH, xpath_specific)
+            print(f"Found preferred Room {args.room}!")
+        except NoSuchElementException:
+            print(f"Preferred Room {args.room} unavailable. searching for ANY available room at {time_str}...")
+            xpath_any = f"//a[contains(@title, '{time_str}') and contains(@title, 'Available')]"
+            try:
+                # Get all available slots at that time
+                slots = driver.find_elements(By.XPATH, xpath_any)
+                if slots:
+                    slot = slots[0] # Pick the first one
+                    # Extract room number from title for logging if possible
+                    title = slot.get_attribute("title")
+                    print(f"Found alternative slot: {title}")
+                else:
+                    print(f"No rooms available at all at {time_str}.")
+                    return
+            except Exception as e:
+                print(f"Error finding alternative room: {e}")
+                return
+
+        if slot:
             driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", slot)
             driver.execute_script("arguments[0].click();", slot)
-            print(f"Clicked start time {time_str}.")
-            time.sleep(2) 
-        except TimeoutException:
-            print(f"Could not find available slot for {time_str}.")
+            print(f"Clicked start time slot.")
+            time.sleep(2)
+        else:
+            print("Failed to select a slot.")
             return
 
         # 6. Select End Time from Dropdown
-        print("Selecting end time 6:30pm from dropdown...")
+        # Calculate expected end time
+        end_time = start_time + datetime.timedelta(minutes=args.duration)
+        end_time_str = end_time.strftime("%I:%M%p").lstrip("0").lower() 
+        
+        print(f"Selecting end time {end_time_str} from dropdown...")
         try:
             time.sleep(2)
             all_selects = driver.find_elements(By.TAG_NAME, "select")
             target_dropdown_found = False
             
-            for select_el in all_selects:
+            for index, select_el in enumerate(all_selects):
                 try:
+                    # Check visibility
                     if not select_el.is_displayed():
                         continue
+                        
+                    driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", select_el)
                     select = Select(select_el)
+                    
+                    found_option = None
                     for option in select.options:
-                        if "6:30" in option.text or "18:30" in option.text:
-                            select.select_by_visible_text(option.text)
-                            target_dropdown_found = True
-                            break
-                    if target_dropdown_found:
+                        if end_time_str in option.text.lower():
+                             found_option = option
+                             break
+                    
+                    if found_option:
+                        select.select_by_visible_text(found_option.text)
+                        target_dropdown_found = True
+                        print(f"Success: Selected '{found_option.text}'")
                         break
-                except:
+                    
+                except Exception:
                     continue
             
             if not target_dropdown_found:
-                print("Could not find a dropdown with '6:30pm'. Proceeding with default duration...")
+                print(f"WARNING: Could not find a dropdown option containing '{end_time_str}'.")
                 
         except Exception as e:
             print(f"Error selecting end time: {e}")
 
         # 7. Submit Times
+        print("Waiting for selection to register...")
+        time.sleep(2) 
         submit_btn = driver.find_element(By.ID, "submit_times")
         driver.execute_script("arguments[0].click();", submit_btn)
         
@@ -165,7 +239,8 @@ def book_room():
             driver.find_element(By.ID, "submitButton").click()
             print("Logged in.")
         except TimeoutException:
-            print("Login page did not appear. Proceeding...")
+            print("Login page did not appear (already logged in?). Proceeding...")
+            # If we are already logged in, we might be on the next page already.
 
         # 9. Continue Booking & Submit
         print("Finalizing booking...")
@@ -177,6 +252,12 @@ def book_room():
             time.sleep(2)
         except:
             pass
+            
+        if args.dry_run:
+            print("[DRY RUN] Skipping final 'Submit My Booking' click.")
+            print("[DRY RUN] Process would have completed successfully here.")
+            return
+
         try:
             final_submit_btn = wait.until(EC.element_to_be_clickable((By.ID, "btn-form-submit")))
             final_submit_btn.click()
@@ -187,8 +268,7 @@ def book_room():
                 final_submit_btn.click()
                 print("Clicked 'Submit My Booking'.")
             except:
-                print("Could not find 'Submit My Booking' button. Please check browser.")
-                time.sleep(300)
+                print("Could not find 'Submit My Booking' button.")
                 return
 
         time.sleep(5)
@@ -196,9 +276,15 @@ def book_room():
             
     except Exception as e:
         print(f"An error occurred: {e}")
+        # Take screenshot if headless
+        if is_ci or args.headless:
+             driver.save_screenshot("error_screenshot.png")
+             print("Saved error_screenshot.png")
         
     finally:
         print("Done.")
+        driver.quit()
 
 if __name__ == "__main__":
-    book_room()
+    args = parse_arguments()
+    book_room(args)

@@ -1,0 +1,76 @@
+name: Book Study Room
+
+on:
+  schedule:
+    # Runs at 05:01 UTC daily (12:01 AM EST / 1:01 AM EDT)
+  - cron: '1 5 * * *'
+  workflow_dispatch:
+    inputs:
+      target_room:
+        description: 'Room Number (e.g. 464)'
+        required: true
+        default: '466'
+        type: string
+      start_hour:
+        description: 'Start Hour (1-12)'
+        required: true
+        default: '12'
+        type: string
+      start_minute:
+        description: 'Start Minute'
+        required: true
+        default: '30'
+        type: choice
+        options:
+        - '00'
+        - '30'
+      start_ampm:
+        description: 'AM/PM'
+        required: true
+        default: 'PM'
+        type: choice
+        options:
+        - 'AM'
+        - 'PM'
+      duration_minutes:
+        description: 'Duration (minutes)'
+        required: true
+        default: '180'
+        type: choice
+        options:
+        - '30'
+        - '60'
+        - '90'
+        - '120'
+        - '150'
+        - '180'
+
+jobs:
+  book-room:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.9'
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+
+    - name: Run booking script
+      env:
+        CARLETON_USER: ${{ secrets.CARLETON_USER }}
+        CARLETON_PASS: ${{ secrets.CARLETON_PASS }}
+        TARGET_ROOM: ${{ inputs.target_room || vars.TARGET_ROOM || '464' }}
+        START_HOUR: ${{ inputs.start_hour || vars.START_HOUR || '3' }}
+        START_MINUTE: ${{ inputs.start_minute || vars.START_MINUTE || '30' }}
+        START_AMPM: ${{ inputs.start_ampm || vars.START_AMPM || 'PM' }}
+        DURATION_MINUTES: ${{ inputs.duration_minutes || vars.DURATION_MINUTES || '180' }}
+        CI: true
+      run: python book_room.py

@@ -109,18 +109,17 @@ def book_room(args):
         target_day_str = str(target_date.day)
         print(f"Target Date: {target_date.strftime('%A, %B %d, %Y')}")
         
-        # Click "Go To Date"
-        go_to_date_btn = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, "button.fc-goToDate-button")))
-        go_to_date_btn.click()
-        time.sleep(1) 
-        
-        if target_date.month > today.month:
+        # If the target date is in a different month, we need to click 'Next'
+        # This handles both month-end and year-end (December -> January) transitions.
+        if target_date.month != today.month:
+             print("Target date is in next month. Navigating...")
              try:
-                 next_month_btn = driver.find_element(By.CSS_SELECTOR, "button.fc-next-button")
+                 next_month_btn = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, "button.fc-next-button")))
                  next_month_btn.click()
-                 time.sleep(0.5)
-             except:
-                 pass 
+                 # Wait a bit for the calendar to transition
+                 time.sleep(2)
+             except Exception as e:
+                 print(f"Warning: Could not click next month button: {e}")
 
         # Click the day
         driver.execute_script(f"""
